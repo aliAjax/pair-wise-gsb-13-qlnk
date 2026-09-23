@@ -1,191 +1,58 @@
 <script setup lang="ts">
-import { computed, reactive, ref } from "vue";
+/** 油品损溢核销台页面：编排录入、复核冻结、更正版本链与刷新一致性体检 */
+import { computed, ref } from "vue";
+import { ElMessage } from "element-plus";
+import ConflictList from "./components/ConflictList.vue";
+import EntryEditor from "./components/EntryEditor.vue";
+import ShiftCard from "./components/ShiftCard.vue";
+import { formatSigned } from "./domain/calculations";
+import type { Conflict, FuelEntry, ShiftType } from "./domain/types";
+import { useShiftStore } from "./stores/shifts";
 
-type Field = {
-  key: string;
-  label: string;
-  type?: "number" | "date" | "select";
-  options?: readonly string[];
-};
+const store = useShiftStore();
 
-type RecordItem = {
-  id: string;
-  status: string;
-  notes: string;
-  createdAt: string;
-  [key: string]: string | number;
-};
+const today = new Date().toISOString().slice(0, 10);
+const shiftDate = ref(today);
+const shiftType = ref<ShiftType>("早班");
+const entries = ref<FuelEntry[]>([store.emptyEntry()]);
+const formConflicts = ref<Conflict[]>([]);
+const filter = ref<"全部" | "待复核" | "已复核">("全部");
+const auditActive = ref<string[]>([]);
 
-const project = {
-  "number": 7,
-  "folder": "dfwl/frontend/dfwlfront-7",
-  "framework": "vue",
-  "title": "加油站班次交接",
-  "subtitle": "录入油品销量和收款数据，自动计算当班总收入。",
-  "industry": "石油",
-  "stack": [
-    "Vue3",
-    "Vite",
-    "TypeScript",
-    "Element Plus"
-  ],
-  "storageKey": "dfwlfront-7-shift",
-  "formTitle": "新增交接记录",
-  "primaryAction": "保存交接",
-  "entityLabel": "班次",
-  "statuses": [
-    "待复核",
-    "已复核",
-    "有差异"
-  ],
-  "filters": [
-    "全部班次",
-    "早班",
-    "中班",
-    "晚班"
-  ],
-  "fields": [
-    {
-      "key": "shift",
-      "label": "班次",
-      "type": "select",
-      "options": [
-        "早班",
-        "中班",
-        "晚班"
-      ]
-    },
-    {
-      "key": "fuelSales",
-      "label": "油品销量L",
-      "type": "number"
-    },
-    {
-      "key": "cash",
-      "label": "现金收入",
-      "type": "number"
-    },
-    {
-      "key": "digital",
-      "label": "电子支付",
-      "type": "number"
-    }
-  ],
-  "records": [
-    {
-      "shift": "早班",
-      "fuelSales": 4280,
-      "cash": 8300,
-      "digital": 21000,
-      "status": "已复核",
-      "notes": "账实一致"
-    },
-    {
-      "shift": "中班",
-      "fuelSales": 3910,
-      "cash": 6400,
-      "digital": 19800,
-      "status": "待复核",
-      "notes": "等待站长确认"
-    }
-  ],
-  "metricLabels": [
-    "交接记录",
-    "已复核",
-    "总收入"
-  ]
-} as const;
-
-const fields = project.fields as readonly Field[];
-const statuses = [...project.statuses];
-
-function createBlank() {
-  return Object.fromEntries(fields.map((field) => [field.key, field.type === "number" ? 0 : ""]));
-}
-
-function loadRecords(): RecordItem[] {
-  const raw = localStorage.getItem(project.storageKey);
-  if (!raw) {
-    return project.records.map((record, index) => ({
-      ...record,
-      id: `seed-${index + 1}`,
-      createdAt: new Date(Date.now() - index * 86400000).toISOString()
-    })) as RecordItem[];
-  }
-  try {
-    return JSON.parse(raw) as RecordItem[];
-  } catch {
-    return [];
-  }
-}
-
-const records = ref<RecordItem[]>(loadRecords());
-const form = reactive<Record<string, string | number>>(createBlank());
-const note = ref("");
-const filter = ref(project.filters[0]);
-
-const filteredRecords = computed(() => {
-  if (filter.value.startsWith("全部")) return records.value;
-  return records.value.filter((record) => Object.values(record).includes(filter.value));
+const filteredGroups = computed(() => {
+  if (filter.value === "全部") return store.groups;
+  return store.groups.filter((g) => g.current.status === filter.value);
 });
 
-const metrics = computed(() => {
-  const total = records.value.length;
-  const second = records.value.filter((record) => record.status === statuses[1]).length;
-  const third = records.value.filter((record) => record.status === statuses[2]).length;
-  const numberValues = records.value.flatMap((record) =>
-    fields.filter((field) => field.type === "number").map((field) => Number(record[field.key] || 0))
+const totalLoss = computed(() =>
+  store.fuelLossSummary.reduce((sum, item) => sum + item.gainLoss, 0)
+);
+
+function resetEntries() {
+  entries.value = [store.emptyEntry()];
+}
+
+function submitShift() {
+  const result = store.createShift(shiftDate.value, shiftType.value, entries.value);
+  formConflicts.value = result.conflicts;
+  if (result.ok) {
+    ElMessage.success("班次已创建，状态：待复核");
+    resetEntries();
+  }
+}
+
+function refresh() {
+  const result = store.refresh();
+  auditActive.value = ["audit"];
+  ElMessage[result.ok ? "success" : "warning"](
+    result.ok ? "刷新体检通过：班次、损溢、归因、版本链一致" : `刷新发现 ${result.conflicts.length} 项一致性冲突`
   );
-  const sum = numberValues.reduce((acc, value) => acc + value, 0);
-  return [total, second || sum, third || Math.round(sum / Math.max(total, 1))];
-});
-
-const chartRows = computed(() => statuses.map((status) => ({
-  status,
-  value: records.value.filter((record) => record.status === status).length
-})));
-
-const maxChart = computed(() => Math.max(1, ...chartRows.value.map((row) => row.value)));
-
-function persist() {
-  localStorage.setItem(project.storageKey, JSON.stringify(records.value));
 }
 
-function nextStatus(status: string) {
-  const index = statuses.indexOf(status);
-  return statuses[(index + 1) % statuses.length];
-}
-
-function primaryText(record: RecordItem) {
-  const first = fields[0];
-  const second = fields[1];
-  return [record[first.key], record[second.key]].filter(Boolean).join(" / ") || project.entityLabel;
-}
-
-function submit() {
-  records.value = [
-    {
-      ...form,
-      id: crypto.randomUUID(),
-      status: statuses[0],
-      notes: note.value || "暂无备注",
-      createdAt: new Date().toISOString()
-    } as RecordItem,
-    ...records.value
-  ];
-  Object.assign(form, createBlank());
-  note.value = "";
-  persist();
-}
-
-function flow(record: RecordItem) {
-  record.status = nextStatus(record.status);
-  persist();
-}
-
-function remove(id: string) {
-  records.value = records.value.filter((record) => record.id !== id);
-  persist();
+function resetSeed() {
+  store.resetToSeed();
+  resetEntries();
+  ElMessage.info("已恢复演示数据");
 }
 </script>
 
@@ -194,76 +61,102 @@ function remove(id: string) {
     <div class="shell">
       <header class="topbar">
         <div>
-          <p class="eyebrow">{{ project.industry }}行业前端最小闭环</p>
-          <h1>{{ project.title }}</h1>
-          <p class="subtitle">{{ project.subtitle }}</p>
+          <p class="eyebrow">石油行业 · 加油站班次交接</p>
+          <h1>油品损溢核销台</h1>
+          <p class="subtitle">
+            按油品录入开始罐存、结束罐存、温度、付油量与回罐量；按 20℃ 标准温度修正实存量，
+            损溢率超过千分之三必须归因（计量 / 漏损 / 操作）并写明依据，未归因不得复核。
+            复核即冻结班次与原始罐温，更正只产生带原因的新版本。
+          </p>
         </div>
         <div class="stack">
-          <span v-for="item in project.stack" :key="item" class="tag">{{ item }}</span>
+          <span class="tag">Vue3</span>
+          <span class="tag">TypeScript</span>
+          <span class="tag">Element Plus</span>
+          <span class="tag">Pinia</span>
         </div>
       </header>
 
       <section class="metrics">
-        <article v-for="(label, index) in project.metricLabels" :key="label" class="metric">
-          <span>{{ label }}</span>
-          <strong>{{ metrics[index] }}</strong>
+        <article class="metric">
+          <span>班次（版本链）</span>
+          <strong>{{ store.groups.length }}</strong>
+        </article>
+        <article class="metric">
+          <span>待复核 / 已冻结版本</span>
+          <strong>{{ store.pendingCount }} / {{ store.frozenCount }}</strong>
+        </article>
+        <article class="metric">
+          <span>各油品累计损溢</span>
+          <strong :class="totalLoss < 0 ? 'loss-text' : 'gain-text'">{{ formatSigned(totalLoss) }}</strong>
         </article>
       </section>
 
-      <section class="workspace">
-        <form class="panel" @submit.prevent="submit">
-          <h2>{{ project.formTitle }}</h2>
-          <div class="form-grid">
-            <label v-for="field in fields" :key="field.key">
-              {{ field.label }}
-              <select v-if="field.type === 'select'" v-model="form[field.key]" required>
-                <option value="">请选择</option>
-                <option v-for="option in field.options" :key="option">{{ option }}</option>
-              </select>
-              <input v-else v-model="form[field.key]" :type="field.type || 'text'" required />
-            </label>
-            <label>
-              备注
-              <textarea v-model="note" placeholder="填写处理说明或现场备注" />
-            </label>
-            <button type="submit">{{ project.primaryAction }}</button>
+      <section class="create-panel">
+        <div class="panel-head">
+          <h2>新增班次油品录入</h2>
+          <div class="shift-fields">
+            <el-date-picker v-model="shiftDate" type="date" value-format="YYYY-MM-DD" :clearable="false"
+              placeholder="交接日期" style="width: 150px" />
+            <el-select v-model="shiftType" style="width: 110px">
+              <el-option label="早班" value="早班" />
+              <el-option label="中班" value="中班" />
+              <el-option label="晚班" value="晚班" />
+            </el-select>
+            <el-button type="primary" @click="submitShift">保存班次（待复核）</el-button>
           </div>
-        </form>
+        </div>
+        <EntryEditor v-model="entries" />
+        <ConflictList v-if="formConflicts.length" :conflicts="formConflicts" title="班次保存被拦截" />
+      </section>
 
-        <section class="list-panel">
-          <div class="toolbar">
-            <h2>{{ project.entityLabel }}列表</h2>
-            <select v-model="filter">
-              <option v-for="item in project.filters" :key="item">{{ item }}</option>
-            </select>
+      <section class="list-panel">
+        <div class="toolbar">
+          <h2>班次核销列表</h2>
+          <div class="toolbar-right">
+            <el-radio-group v-model="filter" size="small">
+              <el-radio-button label="全部" />
+              <el-radio-button label="待复核" />
+              <el-radio-button label="已复核" />
+            </el-radio-group>
+            <el-button size="small" @click="refresh">刷新一致性体检</el-button>
+            <el-button size="small" plain @click="resetSeed">恢复演示数据</el-button>
           </div>
+        </div>
 
-          <div class="record-grid">
-            <div v-if="filteredRecords.length === 0" class="empty">暂无匹配数据</div>
-            <article v-for="record in filteredRecords" :key="record.id" class="record">
-              <div class="record-head">
-                <p class="record-title">{{ primaryText(record) }}</p>
-                <span class="status">{{ record.status }}</span>
-              </div>
-              <div class="details">
-                <span v-for="field in fields" :key="field.key">{{ field.label }}: {{ record[field.key] }}</span>
-              </div>
-              <p class="note">{{ record.notes }}</p>
-              <div class="actions">
-                <button type="button" @click="flow(record)">流转状态</button>
-                <button class="secondary" type="button" @click="navigator.clipboard?.writeText(primaryText(record))">复制摘要</button>
-                <button class="danger" type="button" @click="remove(record.id)">删除</button>
-              </div>
-            </article>
-          </div>
+        <el-collapse v-if="auditActive.length" v-model="auditActive" class="audit-collapse">
+          <el-collapse-item name="audit">
+            <template #title>
+              <el-tag size="small" :type="store.auditConflicts.length ? 'danger' : 'success'">
+                刷新体检：{{ store.auditConflicts.length ? `${store.auditConflicts.length} 项冲突` : "一致" }}
+              </el-tag>
+              <span class="audit-title-text">班次、损溢、归因与版本链一致性结果（点击折叠）</span>
+            </template>
+            <ConflictList :conflicts="store.auditConflicts" title="刷新一致性体检" />
+          </el-collapse-item>
+        </el-collapse>
 
-          <div class="mini-chart">
-            <div v-for="row in chartRows" :key="row.status" class="bar">
-              <span>{{ row.status }}</span>
-              <div class="bar-track"><div class="bar-fill" :style="{ width: `${(row.value / maxChart) * 100}%` }" /></div>
-              <strong>{{ row.value }}</strong>
-            </div>
-          </div>
+        <div v-if="filteredGroups.length === 0" class="empty">暂无匹配班次</div>
+        <div class="shift-list">
+          <ShiftCard v-for="group in filteredGroups" :key="group.rootId" :group="group" />
+        </div>
+
+        <section class="fuel-summary">
+          <h3>各油品当前损溢汇总（取每班次最新版本）</h3>
+          <el-table :data="store.fuelLossSummary" border size="small">
+            <el-table-column prop="fuel" label="油品" width="120" />
+            <el-table-column label="累计损溢量">
+              <template #default="{ row }">
+                <el-tag size="small" :type="row.gainLoss < 0 ? 'danger' : row.gainLoss > 0 ? 'warning' : 'info'">
+                  {{ formatSigned(row.gainLoss) }}
+                </el-tag>
+              </template>
+            </el-table-column>
+          </el-table>
+          <p class="rule-note">
+            计算口径：实存量 = 结束罐存 × [1 + 0.0008 × (20 − 温度)]；账面量 = 开始罐存 − 付油量 + 回罐量；
+            损溢率 = (实存量 − 账面量) / |账面量|，|损溢率| &gt; 3‰ 必须归因并写依据，未归因不得复核。
+          </p>
         </section>
       </section>
     </div>
